@@ -1,0 +1,23 @@
+{
+	"name": "dynamic-nfts",
+	"version": "1.0.0",
+	"description": "using chainlink to build dynamic nfts",
+	"author": "arihantbansal",
+	"main": "index.js",
+	"scripts": {
+		"test": "echo \"Error: no test specified\" && exit 1"
+	},
+	"keywords": [],
+	"license": "ISC",
+	"devDependencies": {
+		"@nomiclabs/hardhat-ethers": "npm:hardhat-deploy-ethers",
+		"ethers": "^5.6.6",
+		"hardhat": "^2.9.5",
+		"dotenv": "^16.0.1",
+		"hardhat-deploy": "^0.11.4"
+	},
+	"dependencies": {
+		"@chainlink/contracts": "^0.4.1",
+		"@openzeppelin/contracts": "^4.6.0"
+	}
+}
