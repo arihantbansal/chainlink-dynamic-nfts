@@ -14,22 +14,35 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 // This import includes functions from both ./KeeperBase.sol and
 // ./interfaces/KeeperCompatibleInterface.sol
 import "@chainlink/contracts/src/v0.8/KeeperCompatible.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
 
 import "hardhat/console.sol";
 
-contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, KeeperCompatibleInterface, Ownable {
+contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, KeeperCompatibleInterface, Ownable, VRFConsumerBaseV2 {
     using Counters for Counters.Counter;
 
     Counters.Counter private _tokenIdCounter;
     AggregatorV3Interface public priceFeed;
 
-		 /**
-    * Use an interval in seconds and a timestamp to slow execution of Upkeep
-    */
+    VRFCoordinatorV2Interface public COORDINATOR;
+    uint256[] public s_randomWords;
+    uint256 public s_requestId;
+    uint32 public callbackGasLimit = 500000; 
+    uint64 public s_subscriptionId;
+    bytes32 keyhash =  0xd89b2bf150e3b9e13446986e571fb9cab24b13cea0a43ea20a6049a85cc807cc; // keyhash, see for Rinkeby https://docs.chain.link/docs/vrf-contracts/#rinkeby-testnet
+    
+
+    /**
+      * Use an interval in seconds and a timestamp to slow execution of Upkeep
+      */
+
     uint public /* immutable */ interval; 
     uint public lastTimeStamp;
-		
-		int256 public currentPrice;
+    int256 public currentPrice;
+    
+    enum MarketTrend { BULL, BEAR }
+    MarketTrend public currentMarketTrend = MarketTrend.BULL; 
 
 
     // IPFS URIs for the dynamic nft graphics/metadata.
@@ -41,25 +54,26 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, KeeperCompatibl
         "https://ipfs.io/ipfs/Qmc3ueexsATjqwpSVJNxmdf2hStWuhSByHtHK5fyJ3R2xb?filename=simple_bull.json"
     ];
     string[] bearUrisIpfs = [
-        "https://ipfs.io/ipfs/QmQMqVUHjCAxeFNE9eUxf89H1b7LpdzhvQZ8TXnj4FPuX1?filename=beanie_bear.json"
+        "https://ipfs.io/ipfs/QmQMqVUHjCAxeFNE9eUxf89H1b7LpdzhvQZ8TXnj4FPuX1?filename=beanie_bear.json",
         "https://ipfs.io/ipfs/QmP2v34MVdoxLSFj1LbGW261fvLcoAsnJWHaBK238hWnHJ?filename=coolio_bear.json",
         "https://ipfs.io/ipfs/QmZVfjuDiUfvxPM7qAvq8Umk3eHyVh7YTbFon973srwFMD?filename=simple_bear.json"
     ];
-		
-		event TokensUpdated(string marketTrend);
+    
+    event TokensUpdated(string marketTrend);
 
 
     // For testing with the mock on Rinkeby, pass in 10(seconds) for `updateInterval` and the address of my 
     // deployed  MockPriceFeed.sol contract (0xD753A1c190091368EaC67bbF3Ee5bAEd265aC420).
-    constructor(uint updateInterval, address _pricefeed) ERC721("Bull&Bear", "BBTK") {
+    constructor(uint updateInterval, address _priceFeed, address _vrfCoordinator) ERC721("Bull&Bear", "BBTK") VRFConsumerBaseV2(_vrfCoordinator) {
         interval = updateInterval;
         lastTimeStamp = block.timestamp;
 
         // set the price feed address to
         // BTC/USD Price Feed Contract Address on Rinkeby: https://rinkeby.etherscan.io/address/0xECe365B379E1dD183B20fc5f022230C044d51404
-        pricefeed = AggregatorV3Interface(_pricefeed);
+        priceFeed = AggregatorV3Interface(_priceFeed);
 
         currentPrice = getLatestPrice();
+        COORDINATOR = VRFCoordinatorV2Interface(_vrfCoordinator);
     }
 
     function safeMint(address to) public {
@@ -84,46 +98,73 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, KeeperCompatibl
         );
     }
 
-		function checkUpkeep(bytes calldata /* checkData */) external view override returns (bool upkeepNeeded, bytes memory /*performData */) {
+    function checkUpkeep(bytes calldata /* checkData */) external view override returns (bool upkeepNeeded, bytes memory /*performData */) {
          upkeepNeeded = (block.timestamp - lastTimeStamp) > interval;
     }
 
-		function performUpkeep(bytes calldata /* performData */ ) external override {
-        //We highly recommend revalidating the upkeep in the performUpkeep function
+    function performUpkeep(bytes calldata /* performData */ ) external override {
+        // revalidating the upkeep
         if ((block.timestamp - lastTimeStamp) > interval ) {
             lastTimeStamp = block.timestamp;         
             int latestPrice =  getLatestPrice();
         
             if (latestPrice == currentPrice) {
-                console.log("NO CHANGE -> returning!");
+                console.log("Just the same!");
                 return;
             }
 
             if (latestPrice < currentPrice) {
-                // bear
-                console.log("ITS BEAR TIME");
-                updateAllTokenUris("bear");
-
+                console.log(unicode"It's a bear market 🐻");
+                currentMarketTrend = MarketTrend.BEAR;
             } else {
-                // bull
-                console.log("ITS BULL TIME");
-                updateAllTokenUris("bull");
+                console.log(unicode"It's a bull market 🐂");
+                currentMarketTrend = MarketTrend.BULL;
             }
 
-            // update currentPrice
+            requestRandomnessForNFTUris();
             currentPrice = latestPrice;
         } else {
-            console.log(
-                " INTERVAL NOT UP!"
-            );
+            console.log("Not time to update yet. Last update was at ", lastTimeStamp);
             return;
-        }     
+        }
     }
 
     // Helpers
     function getLatestPrice() public view returns (int256) {
-        (, int price,,,) = pricefeed.latestRoundData();
+        (, int price,,,) = priceFeed.latestRoundData();
         return price; //  example price returned 3034715771688
+    }
+
+    function requestRandomnessForNFTUris() internal {
+      s_requestId = COORDINATOR.requestRandomWords(
+        keyhash,
+        s_subscriptionId,
+        3, // min confirmations before response
+        callbackGasLimit,
+        1 // number of random values we want
+      );
+
+      console.log("Request ID: ", s_requestId);
+    }
+
+    function fulfillRandomWords(
+      uint256 /* requestId */,
+      uint256[] memory randomWords
+    ) internal override {
+      s_randomWords = randomWords;
+
+      console.log("Fulfilling randomness...");
+
+      string[] memory urisForTrend = currentMarketTrend == MarketTrend.BULL ? bullUrisIpfs : bearUrisIpfs;
+      uint256 idx = randomWords[0] % urisForTrend.length;
+
+      for (uint i = 0; i < _tokenIdCounter.current() ; i++) {
+        _setTokenURI(i, urisForTrend[idx]);
+      } 
+
+      string memory trend = currentMarketTrend == MarketTrend.BULL ? "bullish" : "bearish";
+    
+      emit TokensUpdated(trend);
     }
   
     function updateAllTokenUris(string memory trend) internal {
@@ -131,20 +172,19 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, KeeperCompatibl
             console.log("UPDATING TOKEN URIS WITH ", "bear", trend);
             for (uint i = 0; i < _tokenIdCounter.current() ; i++) {
                 _setTokenURI(i, bearUrisIpfs[0]);
-            } 
-            
+            }
         } else {     
             console.log("UPDATING TOKEN URIS WITH ", "bull", trend);
 
             for (uint i = 0; i < _tokenIdCounter.current() ; i++) {
                 _setTokenURI(i, bullUrisIpfs[0]);
-            }  
+            }
         }   
         emit TokensUpdated(trend);
     }
 
     function setPriceFeed(address newFeed) public onlyOwner {
-        pricefeed = AggregatorV3Interface(newFeed);
+        priceFeed = AggregatorV3Interface(newFeed);
     }
     function setInterval(uint256 newInterval) public onlyOwner {
         interval = newInterval;
@@ -152,6 +192,18 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, KeeperCompatibl
     
     function compareStrings(string memory a, string memory b) internal pure returns (bool) {
         return (keccak256(abi.encodePacked((a))) == keccak256(abi.encodePacked((b))));
+    }
+
+    function setSubscriptionId(uint64 _id) public onlyOwner {
+      s_subscriptionId = _id;
+    }
+
+    function setCallbackGasLimit(uint32 maxGas) public onlyOwner {
+        callbackGasLimit = maxGas;
+    }
+
+    function setVrfCoodinator(address _address) public onlyOwner {
+      COORDINATOR = VRFCoordinatorV2Interface(_address);
     }
 
     // The following functions are overrides required by Solidity.
